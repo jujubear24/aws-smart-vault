@@ -14,6 +14,7 @@ terraform {
 
   # This is the crucial part for a professional setup.
   # We are telling Terraform to store its state file in the S3 bucket we created.
+
   backend "s3" {
     bucket         = "smart-vault-tfstate-jb-sept11-2025"
     key            = "global/terraform.tfstate" # The path to the state file in the bucket
