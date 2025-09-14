@@ -20,3 +20,25 @@ variable "project_name" {
   default     = "SmartVault"
 }
 
+# LAMBDA CONFIGURATION ---
+
+variable "retention_days" {
+  description = "The number of days to retain EBS snapshots."
+  type        = number
+  default     = 7
+}
+
+variable "backup_tag_key" {
+  description = "The tag key used to identify EC2 instances for backup."
+  type        = string
+  default     = "Backup-Tier"
+}
+
+variable "backup_tag_value" {
+  description = "The tag value used to identify EC2 instances for backup."
+  type        = string
+  default     = "Gold"
+}
+
+
+
