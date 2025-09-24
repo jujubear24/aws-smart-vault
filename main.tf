@@ -1,76 +1,122 @@
-# This file contains the core infrastructure resources for our Smart Vault project.
+# -----------------------------------------------------------------------------
+# DATA SOURCES
+# -----------------------------------------------------------------------------
+# This fetches information about the AWS account running the Terraform command,
+# which we need for the KMS policy.
+data "aws_caller_identity" "current" {}
 
-# =================================================================================
-# Data Source to Package Lambda Code
-# =================================================================================
-# This data source creates a zip archive of our Python source code, which is
-# required for deploying it to AWS Lambda.
+# This zips up our Python source code for deployment to Lambda.
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/src"
   output_path = "${path.module}/dist/lambda_function.zip"
 }
 
-# =================================================================================
-# AWS Lambda Function
-# =================================================================================
-# This is the serverless function that will execute our backup logic.
-resource "aws_lambda_function" "smart_vault_lambda" {
-  filename      = data.archive_file.lambda_zip.output_path
-  function_name = "${var.project_name}-Backup-Function"
-  role          = aws_iam_role.smart_vault_lambda_exec_role.arn
-  handler       = "lambda_function.lambda_handler" # File name.function name
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+# -----------------------------------------------------------------------------
+# IAM (Security) RESOURCES
+# -----------------------------------------------------------------------------
+resource "aws_iam_role" "smart_vault_lambda_exec_role" {
+  name = "SmartVault-Lambda-ExecRole"
 
-  runtime = "python3.9"
-  timeout = 300 # 5 minutes
-
-  environment {
-    variables = {
-      RETENTION_DAYS   = var.retention_days
-      BACKUP_TAG_KEY   = var.backup_tag_key
-      BACKUP_TAG_VALUE = var.backup_tag_value
-      DR_REGION        = var.dr_aws_region
-      SNS_TOPIC_ARN    = aws_sns_topic.smart_vault_notifications.arn
-    }
-  }
-
-  tags = {
-    Project = var.project_name
-  }
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [
+      {
+        Action    = "sts:AssumeRole",
+        Effect    = "Allow",
+        Sid       = "",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
 }
 
-# =================================================================================
-# Amazon SNS for Notifications
-# =================================================================================
-# This SNS topic will receive success or failure notifications from our Lambda.
+# Enhanced Lambda IAM policy with additional KMS permissions
+
+resource "aws_iam_role_policy" "smart_vault_lambda_policy" {
+  name = "SmartVault-Lambda-Policy"
+  role = aws_iam_role.smart_vault_lambda_exec_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Effect   = "Allow",
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Action = [
+          "ec2:CreateSnapshot",
+          "ec2:CreateSnapshots",
+          "ec2:DeleteSnapshot",
+          "ec2:DescribeInstances",
+          "ec2:DescribeSnapshots",
+          "ec2:CopySnapshot",
+          "ec2:DescribeVolumes",
+          "ec2:CreateTags"
+        ],
+        Effect   = "Allow",
+        Resource = "*"
+      },
+      {
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey",
+          "kms:GenerateDataKeyWithoutPlaintext",
+          "kms:DescribeKey",
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:GetKeyPolicy"
+        ],
+        Effect   = "Allow",
+        Resource = [
+          "*",
+          aws_kms_key.dr_snapshot_key.arn
+        ]
+      },
+      {
+        Action   = "sns:Publish",
+        Effect   = "Allow",
+        Resource = aws_sns_topic.smart_vault_notifications.arn
+      }
+    ]
+  })
+}
+
+# Output the KMS key ARN for verification
+output "dr_kms_key_arn" {
+  description = "ARN of the DR region KMS key"
+  value       = aws_kms_key.dr_snapshot_key.arn
+}
+
+# -----------------------------------------------------------------------------
+# APPLICATION RESOURCES
+# -----------------------------------------------------------------------------
 resource "aws_sns_topic" "smart_vault_notifications" {
-  name = "${var.project_name}-Notifications"
-
-  tags = {
-    Project = var.project_name
-  }
+  name = "SmartVault-Notifications"
 }
 
-# =================================================================================
-# Amazon EventBridge (CloudWatch Events) for Scheduling
-# =================================================================================
-# This rule triggers our Lambda function on a schedule.
-# The default is "rate(1 day)", but you can change it to a cron expression
-# for more specific timing, e.g., "cron(0 5 * * ? *)" for 5 AM UTC daily.
 resource "aws_cloudwatch_event_rule" "lambda_scheduler" {
-  name                = "${var.project_name}-Daily-Scheduler"
-  description         = "Triggers the Smart Vault backup Lambda daily."
+  name                = "SmartVault-Daily-Backup-Trigger"
+  description         = "Triggers the Smart Vault backup Lambda daily"
   schedule_expression = "rate(1 day)"
 }
 
-# This target connects the EventBridge rule to our Lambda function.
 resource "aws_cloudwatch_event_target" "lambda_target" {
   rule      = aws_cloudwatch_event_rule.lambda_scheduler.name
   arn       = aws_lambda_function.smart_vault_lambda.arn
+  target_id = "TriggerLambda"
 }
 
-# This permission allows EventBridge to invoke our Lambda function.
 resource "aws_lambda_permission" "allow_eventbridge" {
   statement_id  = "AllowExecutionFromEventBridge"
   action        = "lambda:InvokeFunction"
@@ -79,68 +125,127 @@ resource "aws_lambda_permission" "allow_eventbridge" {
   source_arn    = aws_cloudwatch_event_rule.lambda_scheduler.arn
 }
 
-# =================================================================================
-# IAM Role and Policy (Defined in Step 2)
-# =================================================================================
-# We will keep the IAM role and policy definitions from the previous step.
-# They are required for the Lambda function to have the correct permissions.
+# -----------------------------------------------------------------------------
+# Dedicated KMS Key for Disaster Recovery Encryption
+# -----------------------------------------------------------------------------
+resource "aws_kms_key" "dr_snapshot_key" {
+  provider                = aws.dr
+  description             = "KMS key for encrypting DR snapshots for Smart Vault"
+  deletion_window_in_days = 10
+  enable_key_rotation     = true
 
-resource "aws_iam_role" "smart_vault_lambda_exec_role" {
-  name = "${var.project_name}-Lambda-ExecRole"
-
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Id      = "dr-key-policy",
     Statement = [
       {
-        Action    = "sts:AssumeRole",
+        Sid       = "Enable IAM User Permissions",
         Effect    = "Allow",
+        Principal = { "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" },
+        Action    = "kms:*",
+        Resource  = "*"
+      },
+      {
+        Sid = "Allow SmartVault Lambda to use this key for encryption",
+        Effect = "Allow",
         Principal = {
-          Service = "lambda.amazonaws.com"
+          "AWS" : aws_iam_role.smart_vault_lambda_exec_role.arn
+        },
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid = "Allow EC2 service to use the key for snapshot operations",
+        Effect = "Allow",
+        Principal = {
+          "Service": "ec2.amazonaws.com"
+        },
+        Action = [
+          "kms:CreateGrant",
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        Resource = "*",
+        Condition = {
+          "StringEquals": {
+            "kms:CallerAccount": data.aws_caller_identity.current.account_id
+          }
+        }
+      },
+      # Additional statement for cross-region operations
+      {
+        Sid = "Allow cross-region snapshot operations",
+        Effect = "Allow",
+        Principal = {
+          "AWS" : aws_iam_role.smart_vault_lambda_exec_role.arn
+        },
+        Action = [
+          "kms:CreateGrant"
+        ],
+        Resource = "*",
+        Condition = {
+          "Bool": {
+            "kms:GrantIsForAWSResource": "true"
+          },
+          "StringEquals": {
+            "kms:CallerAccount": data.aws_caller_identity.current.account_id
+          }
         }
       }
     ]
   })
 
   tags = {
-    Project = var.project_name
+    Name        = "SmartVault-DR-KMS-Key"
+    Environment = "Production"
+    ManagedBy   = "Terraform"
+  }
+}
+ 
+
+resource "aws_kms_alias" "dr_snapshot_key_alias" {
+  provider      = aws.dr
+  name          = "alias/smart-vault-dr-key"
+  target_key_id = aws_kms_key.dr_snapshot_key.key_id
+}
+
+# -----------------------------------------------------------------------------
+# Lambda Function with KMS Key Awareness
+# -----------------------------------------------------------------------------
+resource "aws_lambda_function" "smart_vault_lambda" {
+  filename         = data.archive_file.lambda_zip.output_path
+  function_name    = "SmartVault-Backup-Function"
+  role             = aws_iam_role.smart_vault_lambda_exec_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.9"
+  timeout          = 300
+  memory_size      = 128
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  environment {
+    variables = {
+      RETENTION_DAYS   = var.retention_days
+      BACKUP_TAG_KEY   = var.backup_tag_key
+      BACKUP_TAG_VALUE = var.backup_tag_value
+      DR_REGION        = var.dr_aws_region
+      SNS_TOPIC_ARN    = aws_sns_topic.smart_vault_notifications.arn
+      DR_KMS_KEY_ARN   = aws_kms_key.dr_snapshot_key.arn
+    }
   }
 }
 
-resource "aws_iam_role_policy" "smart_vault_lambda_policy" {
-  name = "${var.project_name}-Lambda-Policy"
-  role = aws_iam_role.smart_vault_lambda_exec_role.id
 
-  # SECURITY UPDATE: We are now locking down the SNS Publish action to the
-  # specific topic we are creating in this file. This is a critical best practice.
-  policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [
-      {
-        Effect   = "Allow",
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Effect   = "Allow",
-        Action   = ["ec2:DescribeInstances", "ec2:CreateSnapshot", "ec2:CreateSnapshots", "ec2:DeleteSnapshot", "ec2:DescribeSnapshots", "ec2:CopySnapshot"],
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow",
-        Action   = ["ec2:CreateTags", "ec2:DeleteTags"],
-        Resource = "arn:aws:ec2:*:*:*",
-        Condition = {
-          StringEquals = {
-            "ec2:CreateAction" = ["CreateSnapshot", "CopySnapshot"]
-          }
-        }
-      },
-      {
-        # This is now more secure!
-        Effect   = "Allow",
-        Action   = "sns:Publish",
-        Resource = aws_sns_topic.smart_vault_notifications.arn
-      }
-    ]
-  })
-}
+
+
