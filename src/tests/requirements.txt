@@ -1,0 +1,4 @@
+boto3
+moto[ec2,kms,sns]
+freezegun
+
