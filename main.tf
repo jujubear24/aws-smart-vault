@@ -169,7 +169,7 @@ resource "aws_kms_key" "dr_snapshot_key" {
         Sid = "Allow EC2 service to use the key for snapshot operations",
         Effect = "Allow",
         Principal = {
-          "Service": "ec2.amazonaws.com" # FIX: Use the correct global service principal
+          "Service": "ec2.amazonaws.com"
         },
         Action = [
             "kms:CreateGrant",
@@ -293,7 +293,10 @@ resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
         Action = [
           "ec2:DescribeSnapshots",
           "ec2:CreateVolume",
-          "ec2:CreateTags" # FIX: Add the missing permission to tag the new volume
+          "ec2:CreateTags",
+          "ec2:RunInstances",
+          "ec2:AttachVolume",
+          "ec2:DescribeVolumes"
         ],
         Effect   = "Allow",
         Resource = "*"
@@ -329,7 +332,7 @@ resource "aws_lambda_function" "smart_vault_restore_lambda" {
   role             = aws_iam_role.smart_vault_restore_lambda_role.arn
   handler          = "restore_function.handler"
   runtime          = "python3.9"
-  timeout          = 60
+  timeout          = 300 # Increase timeout to allow for instance launch
   memory_size      = 128
   source_code_hash = data.archive_file.restore_lambda_zip.output_base64sha256
 
@@ -434,6 +437,8 @@ output "api_key_value" {
   value       = aws_api_gateway_api_key.smart_vault_api_key.value
   sensitive   = true
 }
+
+
 
 
 
