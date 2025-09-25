@@ -292,7 +292,8 @@ resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
       {
         Action = [
           "ec2:DescribeSnapshots",
-          "ec2:CreateVolume"
+          "ec2:CreateVolume",
+          "ec2:CreateTags" # FIX: Add the missing permission to tag the new volume
         ],
         Effect   = "Allow",
         Resource = "*"
