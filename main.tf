@@ -99,6 +99,60 @@ output "dr_kms_key_arn" {
 }
 
 # -----------------------------------------------------------------------------
+# NEW: IAM RESOURCES FOR RESTORE FUNCTIONALITY
+# -----------------------------------------------------------------------------
+# This creates a dedicated, least-privilege IAM role for our new Restore Lambda.
+resource "aws_iam_role" "smart_vault_restore_lambda_role" {
+  name = "SmartVault-Restore-Lambda-Role"
+
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [
+      {
+        Action    = "sts:AssumeRole",
+        Effect    = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# This policy grants the Restore Lambda ONLY the permissions it needs to:
+# 1. Write logs to CloudWatch.
+# 2. Describe snapshots (to verify the one being restored).
+# 3. Create a new volume from a snapshot.
+resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
+  name = "SmartVault-Restore-Lambda-Policy"
+  role = aws_iam_role.smart_vault_restore_lambda_role.id
+
+  policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Effect   = "Allow",
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Action = [
+          "ec2:DescribeSnapshots",
+          "ec2:CreateVolume"
+        ],
+        Effect   = "Allow",
+        Resource = "*" # Permissions for these actions are resource-agnostic
+      }
+    ]
+  })
+}
+
+
+# -----------------------------------------------------------------------------
 # APPLICATION RESOURCES
 # -----------------------------------------------------------------------------
 resource "aws_sns_topic" "smart_vault_notifications" {
