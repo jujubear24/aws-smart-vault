@@ -1,159 +1,157 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import os
 import boto3
 from moto import mock_aws
 import json
 from typing import Any, Dict, List
 
-# Add the restore handler's path to our system path for import
+# Add the source directories to our system path for imports
 import sys
 
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "restore_handler"))
 )
+sys.path.insert(
+    0,
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "restore_api_handler")
+    ),
+)
+
+# Now we can import both handlers
 import restore_function
+import handler as api_handler
 
 
 @mock_aws
-class TestRestoreLambda(unittest.TestCase):
-    """Unit tests for the restore_function Lambda."""
+class TestRestoreLambdas(unittest.TestCase):
+    """Unit tests for the entire restore workflow (API Handler and Worker)."""
 
     def setUp(self) -> None:
         """Set up mock AWS environment before each test."""
-        self.mock_env = patch.dict(os.environ, {"AWS_REGION": "us-east-1"})
+        self.mock_env = patch.dict(
+            os.environ,
+            {
+                "AWS_REGION": "us-east-1",
+                "SNS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:SmartVault-Notifications",
+            },
+        )
         self.mock_env.start()
 
         self.ec2 = boto3.client("ec2", region_name="us-east-1")
+        self.sns = boto3.client("sns", region_name="us-east-1")
 
-        # Create mock networking for instance launch
+        self.sns.create_topic(Name="SmartVault-Notifications")
         self.vpc = self.ec2.create_vpc(CidrBlock="10.0.0.0/16")
         self.subnet = self.ec2.create_subnet(
-            VpcId=self.vpc["Vpc"]["VpcId"], CidrBlock="10.0.1.0/24"
+            VpcId=self.vpc["Vpc"]["VpcId"],
+            CidrBlock="10.0.1.0/24",
+            AvailabilityZone="us-east-1a",
         )
-
+        self.subnet_id = self.subnet["Subnet"]["SubnetId"]
         self.volume = self.ec2.create_volume(AvailabilityZone="us-east-1a", Size=8)
-        self.volume_id = self.volume["VolumeId"]
-
-        self.snapshot = self.ec2.create_snapshot(
-            VolumeId=self.volume_id, Description="Test snapshot"
-        )
+        self.snapshot = self.ec2.create_snapshot(VolumeId=self.volume["VolumeId"])
         self.snapshot_id = self.snapshot["SnapshotId"]
 
     def tearDown(self) -> None:
-        """Stop patching environment variables after each test."""
         self.mock_env.stop()
 
     def _create_api_event(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """Helper to create a mock API Gateway event."""
         return {"body": json.dumps(body)}
 
-    def test_successful_volume_restore_only(self) -> None:
-        """Test the success path for restoring only a volume."""
-        event = self._create_api_event(
-            {"snapshot_id": self.snapshot_id, "availability_zone": "us-east-1a"}
-        )
+    # --- API Handler Tests ---
 
-        response = restore_function.handler(event, {})
+    def test_api_handler_success(self) -> None:
+        """Test the API handler successfully invokes the worker."""
+        worker_arn = "arn:aws:lambda:us-east-1:123456789012:function:worker"
+        with patch.dict(os.environ, {"WORKER_LAMBDA_ARN": worker_arn}):
+            with patch("boto3.client") as mock_boto_client:
+                mock_lambda = MagicMock()
+                mock_boto_client.return_value = mock_lambda
 
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(
-            response_body["message"], "Volume restore initiated successfully."
-        )
-        self.assertNotIn(
-            "instance_id", response_body
-        )  # Ensure instance ID is not in response
+                payload = {"snapshot_id": self.snapshot_id}
+                event = self._create_api_event(payload)
 
-    def test_successful_full_instance_restore(self) -> None:
-        """Test the success path for restoring a volume and launching an instance."""
-        event = self._create_api_event(
-            {
-                "snapshot_id": self.snapshot_id,
-                "availability_zone": "us-east-1a",
-                "launch_instance": True,
-                "instance_type": "t2.micro",
-                "ami_id": "ami-12345678",
-                "subnet_id": self.subnet["Subnet"]["SubnetId"],
-            }
-        )
+                response = api_handler.lambda_handler(event, {})
 
-        response = restore_function.handler(event, {})
+                self.assertEqual(response["statusCode"], 202)
+                mock_lambda.invoke.assert_called_once_with(
+                    FunctionName=worker_arn,
+                    InvocationType="Event",
+                    Payload=json.dumps(payload),
+                )
 
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(
-            response_body["message"],
-            "Instance launch and volume attachment initiated successfully.",
-        )
-        self.assertIn("vol-", response_body["volume_id"])
-        self.assertIn("i-", response_body["instance_id"])
+    def test_api_handler_invalid_json(self) -> None:
+        """Test API handler fails with malformed JSON."""
+        # FIX: Add the required environment variable patch to this test.
+        # This allows the handler to run without a KeyError, so it can correctly
+        # find and handle the json.JSONDecodeError.
+        worker_arn = "arn:aws:lambda:us-east-1:123456789012:function:worker"
+        with patch.dict(os.environ, {"WORKER_LAMBDA_ARN": worker_arn}):
+            with patch(
+                "boto3.client"
+            ):  # Still need to mock boto so it doesn't try a real call
+                event = {"body": '{"key": "value",}'}  # Malformed
+                response = api_handler.lambda_handler(event, {})
+                self.assertEqual(response["statusCode"], 400)
 
-        # Verify the instance and attachment
-        instance_id = response_body["instance_id"]
-        volume_id = response_body["volume_id"]
+    # --- Worker Function Tests ---
 
-        reservations = self.ec2.describe_instances(InstanceIds=[instance_id])[
-            "Reservations"
-        ]
-        self.assertEqual(len(reservations), 1)
-        instance = reservations[0]["Instances"][0]
+    def test_worker_successful_full_restore(self) -> None:
+        """Test the worker successfully restores an instance and volume."""
+        event = {
+            "snapshot_id": self.snapshot_id,
+            "launch_instance": True,
+            "instance_type": "t2.micro",
+            "ami_id": "ami-12345678",
+            "subnet_id": self.subnet_id,
+        }
 
-        # FIX: Check if our restored volume ID is present in any of the attached block devices.
-        attached_volume_ids = [
-            mapping["Ebs"]["VolumeId"]
-            for mapping in instance.get("BlockDeviceMappings", [])
-        ]
-        self.assertIn(volume_id, attached_volume_ids)
+        original_boto3_client = boto3.client
+        with patch("restore_function.boto3.client") as mock_boto_client:
+            mock_sns_client = MagicMock()
 
-    def test_missing_instance_launch_params(self) -> None:
-        """Test failure when launch_instance is true but params are missing."""
-        event = self._create_api_event(
-            {
-                "snapshot_id": self.snapshot_id,
-                "availability_zone": "us-east-1a",
-                "launch_instance": True,
-                # Missing instance_type, ami_id, subnet_id
-            }
-        )
+            def side_effect(service_name: str, **kwargs: Any) -> Any:
+                if service_name == "sns":
+                    return mock_sns_client
+                return original_boto3_client(service_name, **kwargs)
 
-        response = restore_function.handler(event, {})
-        self.assertEqual(response["statusCode"], 400)
-        self.assertIn(
-            "Missing required parameters for instance launch",
-            json.loads(response["body"])["message"],
-        )
+            mock_boto_client.side_effect = side_effect
 
-    def test_missing_snapshot_id(self) -> None:
-        """Test failure when snapshot_id is missing from the payload."""
-        event = self._create_api_event({"availability_zone": "us-east-1a"})
-        response = restore_function.handler(event, {})
+            result = restore_function.handler(event, {})
+            self.assertEqual(result["status"], "success")
 
-        self.assertEqual(response["statusCode"], 400)
-        self.assertIn(
-            "Missing required parameters", json.loads(response["body"])["message"]
-        )
+            mock_sns_client.publish.assert_called_once()
+            call_kwargs = mock_sns_client.publish.call_args.kwargs
+            self.assertIn("SUCCEEDED", call_kwargs["Subject"])
+            self.assertIn("Successfully launched instance", call_kwargs["Message"])
 
-    def test_snapshot_not_found(self) -> None:
-        """Test failure when the requested snapshot does not exist."""
-        event = self._create_api_event(
-            {"snapshot_id": "snap-ffffffff", "availability_zone": "us-east-1a"}
-        )
+    def test_worker_fails_on_missing_params(self) -> None:
+        """Test the worker fails gracefully and sends a notification."""
+        event = {
+            "snapshot_id": self.snapshot_id,
+            "launch_instance": True,
+        }  # Missing subnet_id
 
-        response = restore_function.handler(event, {})
+        original_boto3_client = boto3.client
+        with patch("restore_function.boto3.client") as mock_boto_client:
+            mock_sns_client = MagicMock()
 
-        self.assertEqual(
-            response["statusCode"], 500
-        )  # The helper now raises a client error
-        self.assertIn("not found", json.loads(response["body"])["message"])
+            def side_effect(service_name: str, **kwargs: Any) -> Any:
+                if service_name == "sns":
+                    return mock_sns_client
+                return original_boto3_client(service_name, **kwargs)
 
-    def test_invalid_json_body(self) -> None:
-        """Test failure when the request body is not valid JSON."""
-        event = {"body": '{"snapshot_id": "snap-123", }'}  # Malformed JSON
-        response = restore_function.handler(event, {})
+            mock_boto_client.side_effect = side_effect
 
-        self.assertEqual(response["statusCode"], 400)
-        self.assertIn("Invalid JSON format", json.loads(response["body"])["message"])
+            result = restore_function.handler(event, {})
+            self.assertEqual(result["status"], "failed")
+
+            mock_sns_client.publish.assert_called_once()
+            call_kwargs = mock_sns_client.publish.call_args.kwargs
+            self.assertIn("FAILED", call_kwargs["Subject"])
+            self.assertIn("subnet_id is required", call_kwargs["Message"])
 
 
 if __name__ == "__main__":

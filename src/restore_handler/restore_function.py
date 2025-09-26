@@ -12,145 +12,140 @@ logger.setLevel(logging.INFO)
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    This Lambda function restores an EBS volume from a given snapshot ID.
-    If instance parameters are provided, it also launches a new EC2 instance
-    and attaches the restored volume.
-
-    Expected JSON payload:
-    {
-        "snapshot_id": "snap-0123456789abcdef",
-        "availability_zone": "us-east-1a",
-        "launch_instance": true, // optional
-        "instance_type": "t2.micro", // required if launch_instance is true
-        "ami_id": "ami-0c55b159cbfafe1f0", // required if launch_instance is true
-        "subnet_id": "subnet-xxxxxxxx", // required if launch_instance is true
-        "device_name": "/dev/sdf" // optional, defaults to /dev/sdf
-    }
+    This is the ASYNCHRONOUS worker Lambda. It is triggered by the API Handler.
+    It performs the long-running tasks of restoring a volume and launching an instance.
     """
+    # NOTE: Since this is invoked asynchronously from another Lambda,
+    # the 'event' is the raw JSON payload, not an API Gateway event object.
+
+    sns_client = boto3.client("sns")
+    # Use the SNS Topic ARN from the backup function, passed via environment variable
+    sns_topic_arn = os.environ.get("SNS_TOPIC_ARN", "not-set")
+
     try:
         region = os.environ.get("AWS_REGION", "us-east-1")
         ec2_client = boto3.client("ec2", region_name=region)
 
-        logger.info("Received event: %s", event)
-        body = json.loads(event.get("body", "{}"))
-
+        logger.info("Worker received event: %s", event)
+        body = event  # The event itself is the body now
         snapshot_id = body.get("snapshot_id")
-        az = body.get("availability_zone")
 
-        if not snapshot_id or not az:
-            return _create_error_response(
-                400, "Missing required parameters: snapshot_id and availability_zone"
+        az = body.get("availability_zone")
+        subnet_id = body.get("subnet_id")
+        launch_instance = body.get("launch_instance", False)
+
+        if launch_instance:
+            if not subnet_id:
+                raise ValueError("subnet_id is required when launch_instance is true.")
+            logger.info("Deriving Availability Zone from subnet %s.", subnet_id)
+            az = _get_az_from_subnet(ec2_client, subnet_id)
+        elif not az:
+            raise ValueError(
+                "availability_zone is required when only restoring a volume."
             )
+
+        if not snapshot_id:
+            raise ValueError("Missing required parameter: snapshot_id")
 
         logger.info(
             "Attempting to restore snapshot %s into Availability Zone %s",
             snapshot_id,
             az,
         )
-
         _verify_snapshot_exists(ec2_client, snapshot_id)
-
         new_volume_id = _create_volume(ec2_client, snapshot_id, az)
 
-        # --- ENHANCEMENT: Launch instance if requested ---
-        if body.get("launch_instance"):
+        if launch_instance:
+            instance_type = body.get("instance_type", "t3.micro")
+            ami_id = body.get("ami_id")
+
             instance_params = {
-                "instance_type": body.get("instance_type"),
-                "ami_id": body.get("ami_id"),
-                "subnet_id": body.get("subnet_id"),
+                "instance_type": instance_type,
+                "ami_id": ami_id,
+                "subnet_id": subnet_id,
             }
-            # Validate required parameters for instance launch
-            if not all(instance_params.values()):
-                return _create_error_response(
-                    400,
-                    "Missing required parameters for instance launch: instance_type, ami_id, and subnet_id are required.",
+            if not all([ami_id, subnet_id]):
+                raise ValueError(
+                    "Missing required parameters for instance launch: ami_id and subnet_id are required."
                 )
 
-            logger.info(
-                "Instance launch requested. Waiting for volume %s to become available.",
-                new_volume_id,
-            )
-
-            # Wait for volume to be available before launching instance
             waiter = ec2_client.get_waiter("volume_available")
             waiter.wait(VolumeIds=[new_volume_id])
-            logger.info("Volume %s is now available.", new_volume_id)
-
             new_instance_id = _launch_instance(ec2_client, instance_params, az)
 
-            logger.info(
-                "Instance %s launched. Waiting for it to be in 'running' state.",
-                new_instance_id,
-            )
             waiter = ec2_client.get_waiter("instance_running")
             waiter.wait(InstanceIds=[new_instance_id])
-            logger.info(
-                "Instance %s is running. Attaching volume %s.",
-                new_instance_id,
-                new_volume_id,
-            )
 
             device_name = body.get("device_name", "/dev/sdf")
             _attach_volume(ec2_client, new_instance_id, new_volume_id, device_name)
 
-            return {
-                "statusCode": 200,
-                "body": json.dumps(
-                    {
-                        "message": "Instance launch and volume attachment initiated successfully.",
-                        "instance_id": new_instance_id,
-                        "volume_id": new_volume_id,
-                    }
-                ),
-            }
-        else:
-            return {
-                "statusCode": 200,
-                "body": json.dumps(
-                    {
-                        "message": "Volume restore initiated successfully.",
-                        "volume_id": new_volume_id,
-                    }
-                ),
-            }
+            success_message = f"Smart Vault Restore SUCCEEDED.\n\nSuccessfully launched instance {new_instance_id} and attached restored volume {new_volume_id} from snapshot {snapshot_id}."
+            _send_sns_notification(
+                sns_client,
+                sns_topic_arn,
+                "Smart Vault Restore SUCCEEDED",
+                success_message,
+            )
 
-    except json.JSONDecodeError:
-        return _create_error_response(400, "Invalid JSON format in request body.")
-    except (ClientError, ParamValidationError) as e:
-        logger.error("Boto3 client error: %s", str(e))
-        return _create_error_response(500, f"An AWS service error occurred: {str(e)}")
+        else:
+            success_message = f"Smart Vault Restore SUCCEEDED.\n\nSuccessfully restored volume {new_volume_id} from snapshot {snapshot_id}."
+            _send_sns_notification(
+                sns_client,
+                sns_topic_arn,
+                "Smart Vault Restore SUCCEEDED",
+                success_message,
+            )
+
+        return {"status": "success"}
+
     except Exception as e:
-        logger.error("An unexpected error occurred: %s", str(e))
-        return _create_error_response(500, f"An unexpected error occurred: {str(e)}")
+        error_message = f"Smart Vault Restore FAILED.\n\nError processing request for snapshot '{body.get('snapshot_id', 'N/A')}'.\n\nReason: {str(e)}"
+        logger.error(error_message, exc_info=True)
+        _send_sns_notification(
+            sns_client, sns_topic_arn, "Smart Vault Restore FAILED", error_message
+        )
+        # In async invocation, the return value doesn't go to the user, but it's good practice.
+        return {"status": "failed", "reason": str(e)}
 
 
 # --- Helper Functions ---
 
 
-def _create_error_response(status_code: int, message: str) -> Dict[str, Any]:
-    """Creates a standardized error response for API Gateway."""
-    logger.error("Error Response %d: %s", status_code, message)
-    return {
-        "statusCode": status_code,
-        "body": json.dumps({"message": message}),
-    }
+def _send_sns_notification(
+    sns_client: Any, topic_arn: str, subject: str, message: str
+) -> None:
+    """Sends a notification to the configured SNS topic."""
+    if topic_arn == "not-set":
+        logger.warning("SNS_TOPIC_ARN not set. Cannot send notification.")
+        return
+    try:
+        sns_client.publish(TopicArn=topic_arn, Subject=subject, Message=message)
+    except Exception as e:
+        logger.error("Failed to send SNS notification: %s", str(e))
+
+
+def _get_az_from_subnet(ec2_client: Any, subnet_id: str) -> str:
+    """Looks up a subnet and returns its Availability Zone."""
+    try:
+        response = ec2_client.describe_subnets(SubnetIds=[subnet_id])
+        if not response["Subnets"]:
+            raise ValueError(f"Subnet '{subnet_id}' not found.")
+        az = response["Subnets"][0]["AvailabilityZone"]
+        logger.info("Found AZ '%s' for subnet '%s'", az, subnet_id)
+        return az
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "InvalidSubnetID.NotFound":
+            raise ValueError(f"Subnet '{subnet_id}' not found.")
+        raise
 
 
 def _verify_snapshot_exists(ec2_client: Any, snapshot_id: str) -> None:
-    """Verifies a snapshot exists, raising a ClientError if not found."""
+    """Verifies a snapshot exists, raising a ValueError if not found."""
     try:
         ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])
     except ClientError as e:
         if e.response["Error"]["Code"] == "InvalidSnapshot.NotFound":
-            raise ClientError(
-                {
-                    "Error": {
-                        "Code": "404",
-                        "Message": f"Snapshot '{snapshot_id}' not found.",
-                    }
-                },
-                "DescribeSnapshots",
-            )
+            raise ValueError(f"Snapshot '{snapshot_id}' not found.")
         raise
 
 

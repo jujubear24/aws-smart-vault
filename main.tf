@@ -296,7 +296,9 @@ resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
           "ec2:CreateTags",
           "ec2:RunInstances",
           "ec2:AttachVolume",
-          "ec2:DescribeVolumes"
+          "ec2:DescribeVolumes",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeInstances"
         ],
         Effect   = "Allow",
         Resource = "*"
@@ -324,15 +326,17 @@ data "archive_file" "restore_lambda_zip" {
 }
 
 # -----------------------------------------------------------------------------
-# RESTORE LAMBDA FUNCTION
+# RESTORE LAMBDA FUNCTION (Now the Asynchronous Worker)
 # -----------------------------------------------------------------------------
-resource "aws_lambda_function" "smart_vault_restore_lambda" {
+# We are renaming this from "smart_vault_restore_lambda" to "smart_vault_restore_worker_lambda"
+# It is no longer connected to the API Gateway and will handle the long-running tasks.
+resource "aws_lambda_function" "smart_vault_restore_worker_lambda" {
   filename         = data.archive_file.restore_lambda_zip.output_path
-  function_name    = "SmartVault-Restore-Function"
+  function_name    = "SmartVault-Restore-Worker-Function" # New function name
   role             = aws_iam_role.smart_vault_restore_lambda_role.arn
   handler          = "restore_function.handler"
   runtime          = "python3.9"
-  timeout          = 300 # Increase timeout to allow for instance launch
+  timeout          = 300
   memory_size      = 128
   source_code_hash = data.archive_file.restore_lambda_zip.output_base64sha256
 
@@ -341,6 +345,82 @@ resource "aws_lambda_function" "smart_vault_restore_lambda" {
     mode = "Active"
   }
 }
+
+# -----------------------------------------------------------------------------
+# NEW: API HANDLER LAMBDA (The Synchronous Validator)
+# -----------------------------------------------------------------------------
+# This new, fast Lambda will handle the API Gateway request.
+data "archive_file" "restore_api_handler_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/src/restore_api_handler" # Points to a new directory
+  output_path = "${path.module}/dist/restore_api_handler.zip"
+}
+
+resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
+  filename         = data.archive_file.restore_api_handler_zip.output_path
+  function_name    = "SmartVault-Restore-API-Handler-Function"
+  role             = aws_iam_role.smart_vault_restore_api_handler_role.id # Uses a new dedicated role
+  handler          = "handler.lambda_handler" # The handler file will be named handler.py
+  runtime          = "python3.9"
+  timeout          = 20 # Short timeout as it should be very fast
+  memory_size      = 128
+  source_code_hash = data.archive_file.restore_api_handler_zip.output_base64sha256
+
+  environment {
+    variables = {
+      # This tells the handler the name of the worker function it needs to trigger
+      WORKER_LAMBDA_ARN = aws_lambda_function.smart_vault_restore_worker_lambda.arn
+    }
+  }
+
+  tracing_config {
+    mode = "Active"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# NEW: IAM ROLE FOR THE API HANDLER LAMBDA
+# -----------------------------------------------------------------------------
+# This role only needs permission to write logs and invoke our worker lambda.
+resource "aws_iam_role" "smart_vault_restore_api_handler_role" {
+  name = "SmartVault-Restore-API-Handler-Role"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [{
+      Action    = "sts:AssumeRole",
+      Effect    = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "smart_vault_restore_api_handler_policy" {
+  name = "SmartVault-Restore-API-Handler-Policy"
+  role = aws_iam_role.smart_vault_restore_api_handler_role.id
+  policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [
+      {
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+        Effect   = "Allow",
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Action   = "lambda:InvokeFunction",
+        Effect   = "Allow",
+        Resource = aws_lambda_function.smart_vault_restore_worker_lambda.arn
+      },
+      {
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+        Effect   = "Allow",
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+
+
 
 # -----------------------------------------------------------------------------
 # API GATEWAY FOR RESTORE FUNCTIONALITY
@@ -364,19 +444,21 @@ resource "aws_api_gateway_method" "restore_method" {
   api_key_required = true
 }
 
+# The API Gateway integration now points to our new, fast API Handler Lambda.
 resource "aws_api_gateway_integration" "lambda_integration" {
   rest_api_id             = aws_api_gateway_rest_api.smart_vault_api.id
   resource_id             = aws_api_gateway_resource.restore_resource.id
   http_method             = aws_api_gateway_method.restore_method.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.smart_vault_restore_lambda.invoke_arn
+  uri                     = aws_lambda_function.smart_vault_restore_api_handler_lambda.invoke_arn # <-- UPDATED
 }
 
+# Update the permission to allow API Gateway to invoke the new handler
 resource "aws_lambda_permission" "api_gateway_permission" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.smart_vault_restore_lambda.function_name
+  function_name = aws_lambda_function.smart_vault_restore_api_handler_lambda.function_name # <-- UPDATED
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.smart_vault_api.execution_arn}/*/*"
 }
