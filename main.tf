@@ -359,7 +359,7 @@ data "archive_file" "restore_api_handler_zip" {
 resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
   filename         = data.archive_file.restore_api_handler_zip.output_path
   function_name    = "SmartVault-Restore-API-Handler-Function"
-  role             = aws_iam_role.smart_vault_restore_api_handler_role.id # Uses a new dedicated role
+  role             = aws_iam_role.smart_vault_restore_api_handler_role.arn # FIX: Changed .id to .arn
   handler          = "handler.lambda_handler" # The handler file will be named handler.py
   runtime          = "python3.9"
   timeout          = 20 # Short timeout as it should be very fast
