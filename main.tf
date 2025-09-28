@@ -522,7 +522,35 @@ output "api_key_value" {
 }
 
 
+# -----------------------------------------------------------------------------
+# FINAL FEATURE: COST MONITORING & ALERTING
+# -----------------------------------------------------------------------------
+# This creates a CloudWatch alarm that monitors the total estimated charges
+# for the entire AWS account. If the estimated charges exceed the threshold,
+# it will send a notification to our existing SNS topic.
+# NOTE: This requires that "Billing Alerts" have been manually enabled in the
+# AWS Account's billing preferences.
+resource "aws_cloudwatch_metric_alarm" "billing_alarm" {
+  # This provider block is crucial. Billing metrics are always published in us-east-1.
+  provider = aws
 
+  alarm_name          = "SmartVault-Total-Account-Billing-Alarm"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "EstimatedCharges"
+  namespace           = "AWS/Billing"
+  period              = 21600 # Check every 6 hours
+  statistic           = "Maximum"
+  threshold           = var.billing_alarm_threshold # Defaults to 5 USD
+  alarm_description   = "This alarm triggers if the AWS account's estimated charges exceed the configured threshold."
+
+  dimensions = {
+    Currency = "USD"
+  }
+
+  # Send the notification to our existing SNS topic
+  alarm_actions = [aws_sns_topic.smart_vault_notifications.arn]
+}
 
 
 

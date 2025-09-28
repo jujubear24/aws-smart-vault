@@ -1,27 +1,21 @@
-# This file defines the input variables for our Terraform project.
-# Using variables makes our code reusable and easy to configure without
-# changing the core logic.
-
+# -----------------------------------------------------------------------------
+# AWS PROVIDER VARIABLES
+# -----------------------------------------------------------------------------
 variable "primary_aws_region" {
-  description = "The primary AWS region where the main infrastructure will be deployed."
+  description = "The primary AWS region for deploying resources."
   type        = string
   default     = "us-east-1"
 }
 
 variable "dr_aws_region" {
-  description = "The disaster recovery AWS region for cross-region backups."
+  description = "The disaster recovery AWS region."
   type        = string
   default     = "us-west-2"
 }
 
-variable "project_name" {
-  description = "The name of the project, used for tagging resources."
-  type        = string
-  default     = "SmartVault"
-}
-
-# LAMBDA CONFIGURATION ---
-
+# -----------------------------------------------------------------------------
+# BACKUP CONFIGURATION VARIABLES
+# -----------------------------------------------------------------------------
 variable "retention_days" {
   description = "The number of days to retain EBS snapshots."
   type        = number
@@ -39,6 +33,17 @@ variable "backup_tag_value" {
   type        = string
   default     = "Gold"
 }
+
+# -----------------------------------------------------------------------------
+# NEW: COST MONITORING VARIABLES
+# -----------------------------------------------------------------------------
+variable "billing_alarm_threshold" {
+  description = "The threshold in USD for the billing alarm. An alert will be sent if estimated charges exceed this value."
+  type        = number
+  default     = 5
+}
+
+
 
 
 
