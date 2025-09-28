@@ -3,6 +3,7 @@ import boto3
 import os
 import logging
 from typing import Dict, Any
+from botocore.exceptions import ClientError
 
 # Setup logging
 logger = logging.getLogger()
@@ -11,36 +12,73 @@ logger.setLevel(logging.INFO)
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    This is a synchronous Lambda function triggered by API Gateway.
-    Its sole purpose is to validate the incoming request and then
-    asynchronously invoke the long-running worker Lambda.
-    This ensures the API Gateway receives a response within its 29-second timeout.
+    API Gateway handler for Smart Vault restore operations.
+    Validates requests and asynchronously invokes the worker Lambda.
     """
     try:
-        # Get the ARN of the worker function from an environment variable
-        worker_lambda_arn = os.environ["WORKER_LAMBDA_ARN"]
+        logger.info("=== API HANDLER START ===")
+
+        worker_lambda_arn = os.environ.get("WORKER_LAMBDA_ARN")
+        if not worker_lambda_arn:
+            logger.error("FATAL: WORKER_LAMBDA_ARN environment variable is not set")
+            return {
+                "statusCode": 500,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": "Server configuration error"}),
+            }
+
+        request_body = event.get("body")
+        if not request_body:
+            logger.error("Validation Error: Request body is required")
+            return {
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(
+                    {"error": "Bad Request", "message": "Request body is required"}
+                ),
+            }
+
+        try:
+            payload = json.loads(request_body)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in request body: {e}")
+            return {
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(
+                    {
+                        "error": "Bad Request",
+                        "message": f"Invalid JSON format: {str(e)}",
+                    }
+                ),
+            }
+
+        if "snapshot_id" not in payload:
+            logger.error("Validation Error: 'snapshot_id' is missing from payload")
+            return {
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(
+                    {
+                        "error": "Bad Request",
+                        "message": "Missing required field: snapshot_id",
+                    }
+                ),
+            }
+
         lambda_client = boto3.client("lambda")
 
-        logger.info("API Handler received event: %s", event)
-
-        # The original request body is passed directly to the worker
-        request_body = event.get("body", "{}")
-
-        # Basic validation: ensure the body is valid JSON.
-        # The worker will perform the detailed business logic validation.
-        payload = json.loads(request_body)
-
-        logger.info("Invoking worker Lambda '%s' with payload.", worker_lambda_arn)
-
-        # Asynchronously invoke the worker Lambda
+        logger.info(f"Invoking worker Lambda: {worker_lambda_arn}")
         lambda_client.invoke(
             FunctionName=worker_lambda_arn,
-            InvocationType="Event",  # 'Event' means asynchronous invocation
+            InvocationType="Event",
             Payload=json.dumps(payload),
         )
 
+        logger.info("=== API HANDLER SUCCESS ===")
         return {
-            "statusCode": 202,  # 202 Accepted is the standard for async operations
+            "statusCode": 202,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps(
                 {
                     "message": "Restore request accepted and is being processed asynchronously. A notification will be sent upon completion."
@@ -48,21 +86,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             ),
         }
 
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON in request body.")
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"message": "Invalid JSON format in request body."}),
-        }
-    except KeyError:
-        logger.error("WORKER_LAMBDA_ARN environment variable is not set.")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"message": "Server configuration error."}),
-        }
     except Exception as e:
-        logger.error("An unexpected error occurred in the API handler: %s", str(e))
+        logger.exception(f"Unexpected error in API handler: {str(e)}")
         return {
             "statusCode": 500,
-            "body": json.dumps({"message": f"An unexpected error occurred: {str(e)}"}),
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Internal Server Error", "message": str(e)}),
         }

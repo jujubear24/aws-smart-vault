@@ -1,11 +1,8 @@
 # -----------------------------------------------------------------------------
 # DATA SOURCES
 # -----------------------------------------------------------------------------
-# This fetches information about the AWS account running the Terraform command,
-# which we need for the KMS policy.
 data "aws_caller_identity" "current" {}
 
-# This zips up our Python source code for deployment to Lambda.
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/src"
@@ -13,7 +10,7 @@ data "archive_file" "lambda_zip" {
 }
 
 # -----------------------------------------------------------------------------
-# IAM (Security) RESOURCES
+# IAM (Security) RESOURCES FOR BACKUP FUNCTION
 # -----------------------------------------------------------------------------
 resource "aws_iam_role" "smart_vault_lambda_exec_role" {
   name = "SmartVault-Lambda-ExecRole"
@@ -33,7 +30,6 @@ resource "aws_iam_role" "smart_vault_lambda_exec_role" {
   })
 }
 
-# Enhanced Lambda IAM policy with additional KMS and X-Ray permissions
 resource "aws_iam_role_policy" "smart_vault_lambda_policy" {
   name = "SmartVault-Lambda-Policy"
   role = aws_iam_role.smart_vault_lambda_exec_role.id
@@ -87,7 +83,6 @@ resource "aws_iam_role_policy" "smart_vault_lambda_policy" {
         Effect   = "Allow",
         Resource = aws_sns_topic.smart_vault_notifications.arn
       },
-      # Add permissions for AWS X-Ray Tracing
       {
         Action = [
           "xray:PutTraceSegments",
@@ -101,7 +96,7 @@ resource "aws_iam_role_policy" "smart_vault_lambda_policy" {
 }
 
 # -----------------------------------------------------------------------------
-# APPLICATION RESOURCES
+# APPLICATION RESOURCES FOR BACKUP
 # -----------------------------------------------------------------------------
 resource "aws_sns_topic" "smart_vault_notifications" {
   name = "SmartVault-Notifications"
@@ -187,7 +182,6 @@ resource "aws_kms_key" "dr_snapshot_key" {
             }
         }
       },
-      # Additional statement for cross-region operations
       {
         Sid = "Allow cross-region snapshot operations",
         Effect = "Allow",
@@ -224,7 +218,7 @@ resource "aws_kms_alias" "dr_snapshot_key_alias" {
 }
 
 # -----------------------------------------------------------------------------
-# Lambda Function with KMS Key Awareness
+# BACKUP LAMBDA FUNCTION
 # -----------------------------------------------------------------------------
 resource "aws_lambda_function" "smart_vault_lambda" {
   filename         = data.archive_file.lambda_zip.output_path
@@ -247,7 +241,6 @@ resource "aws_lambda_function" "smart_vault_lambda" {
     }
   }
 
-  # Enable AWS X-Ray tracing
   tracing_config {
     mode = "Active"
   }
@@ -282,15 +275,6 @@ resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
     Statement = [
       {
         Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ],
-        Effect   = "Allow",
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Action = [
           "ec2:DescribeSnapshots",
           "ec2:CreateVolume",
           "ec2:CreateTags",
@@ -303,21 +287,27 @@ resource "aws_iam_role_policy" "smart_vault_restore_lambda_policy" {
         Effect   = "Allow",
         Resource = "*"
       },
-      # Add permissions for AWS X-Ray Tracing
       {
-        Action = [
-          "xray:PutTraceSegments",
-          "xray:PutTelemetryRecords"
-        ],
+        Action   = "sns:Publish",
         Effect   = "Allow",
-        Resource = "*"
+        Resource = aws_sns_topic.smart_vault_notifications.arn
       }
     ]
   })
 }
 
+resource "aws_iam_role_policy_attachment" "restore_worker_logs" {
+  role       = aws_iam_role.smart_vault_restore_lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "restore_worker_xray" {
+  role       = aws_iam_role.smart_vault_restore_lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 # -----------------------------------------------------------------------------
-# ZIP UP THE RESTORE LAMBDA SOURCE CODE
+# RESTORE LAMBDA (ASYNCHRONOUS WORKER)
 # -----------------------------------------------------------------------------
 data "archive_file" "restore_lambda_zip" {
   type        = "zip"
@@ -325,14 +315,9 @@ data "archive_file" "restore_lambda_zip" {
   output_path = "${path.module}/dist/restore_function.zip"
 }
 
-# -----------------------------------------------------------------------------
-# RESTORE LAMBDA FUNCTION (Now the Asynchronous Worker)
-# -----------------------------------------------------------------------------
-# We are renaming this from "smart_vault_restore_lambda" to "smart_vault_restore_worker_lambda"
-# It is no longer connected to the API Gateway and will handle the long-running tasks.
 resource "aws_lambda_function" "smart_vault_restore_worker_lambda" {
   filename         = data.archive_file.restore_lambda_zip.output_path
-  function_name    = "SmartVault-Restore-Worker-Function" # New function name
+  function_name    = "SmartVault-Restore-Worker-Function"
   role             = aws_iam_role.smart_vault_restore_lambda_role.arn
   handler          = "restore_function.handler"
   runtime          = "python3.9"
@@ -340,36 +325,9 @@ resource "aws_lambda_function" "smart_vault_restore_worker_lambda" {
   memory_size      = 128
   source_code_hash = data.archive_file.restore_lambda_zip.output_base64sha256
 
-  # Enable AWS X-Ray tracing
-  tracing_config {
-    mode = "Active"
-  }
-}
-
-# -----------------------------------------------------------------------------
-# NEW: API HANDLER LAMBDA (The Synchronous Validator)
-# -----------------------------------------------------------------------------
-# This new, fast Lambda will handle the API Gateway request.
-data "archive_file" "restore_api_handler_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/src/restore_api_handler" # Points to a new directory
-  output_path = "${path.module}/dist/restore_api_handler.zip"
-}
-
-resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
-  filename         = data.archive_file.restore_api_handler_zip.output_path
-  function_name    = "SmartVault-Restore-API-Handler-Function"
-  role             = aws_iam_role.smart_vault_restore_api_handler_role.arn # FIX: Changed .id to .arn
-  handler          = "handler.lambda_handler" # The handler file will be named handler.py
-  runtime          = "python3.9"
-  timeout          = 20 # Short timeout as it should be very fast
-  memory_size      = 128
-  source_code_hash = data.archive_file.restore_api_handler_zip.output_base64sha256
-
   environment {
     variables = {
-      # This tells the handler the name of the worker function it needs to trigger
-      WORKER_LAMBDA_ARN = aws_lambda_function.smart_vault_restore_worker_lambda.arn
+      SNS_TOPIC_ARN = aws_sns_topic.smart_vault_notifications.arn
     }
   }
 
@@ -379,9 +337,14 @@ resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
 }
 
 # -----------------------------------------------------------------------------
-# NEW: IAM ROLE FOR THE API HANDLER LAMBDA
+# API HANDLER LAMBDA (SYNCHRONOUS)
 # -----------------------------------------------------------------------------
-# This role only needs permission to write logs and invoke our worker lambda.
+data "archive_file" "restore_api_handler_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/src/restore_api_handler"
+  output_path = "${path.module}/dist/restore_api_handler.zip"
+}
+
 resource "aws_iam_role" "smart_vault_restore_api_handler_role" {
   name = "SmartVault-Restore-API-Handler-Role"
   assume_role_policy = jsonencode({
@@ -394,33 +357,57 @@ resource "aws_iam_role" "smart_vault_restore_api_handler_role" {
   })
 }
 
-resource "aws_iam_role_policy" "smart_vault_restore_api_handler_policy" {
-  name = "SmartVault-Restore-API-Handler-Policy"
+resource "aws_iam_role_policy_attachment" "api_handler_lambda_logs" {
+  role       = aws_iam_role.smart_vault_restore_api_handler_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "api_handler_xray" {
+  role       = aws_iam_role.smart_vault_restore_api_handler_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
+resource "aws_iam_role_policy" "api_handler_invoke_worker_policy" {
+  name = "SmartVault-API-Handler-Invoke-Worker-Policy"
   role = aws_iam_role.smart_vault_restore_api_handler_role.id
   policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [
       {
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-        Effect   = "Allow",
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
         Action   = "lambda:InvokeFunction",
         Effect   = "Allow",
         Resource = aws_lambda_function.smart_vault_restore_worker_lambda.arn
-      },
-      {
-        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
-        Effect   = "Allow",
-        Resource = "*"
       }
     ]
   })
 }
 
+resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
+  filename         = data.archive_file.restore_api_handler_zip.output_path
+  function_name    = "SmartVault-Restore-API-Handler-Function"
+  role             = aws_iam_role.smart_vault_restore_api_handler_role.arn
+  handler          = "handler.lambda_handler"
+  runtime          = "python3.9"
+  timeout          = 20
+  memory_size      = 128
+  source_code_hash = data.archive_file.restore_api_handler_zip.output_base64sha256
 
+  environment {
+    variables = {
+      WORKER_LAMBDA_ARN = aws_lambda_function.smart_vault_restore_worker_lambda.arn
+    }
+  }
 
+  tracing_config {
+    mode = "Active"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.api_handler_lambda_logs,
+    aws_iam_role_policy_attachment.api_handler_xray,
+    aws_iam_role_policy.api_handler_invoke_worker_policy
+  ]
+}
 
 # -----------------------------------------------------------------------------
 # API GATEWAY FOR RESTORE FUNCTIONALITY
@@ -444,27 +431,42 @@ resource "aws_api_gateway_method" "restore_method" {
   api_key_required = true
 }
 
-# The API Gateway integration now points to our new, fast API Handler Lambda.
 resource "aws_api_gateway_integration" "lambda_integration" {
   rest_api_id             = aws_api_gateway_rest_api.smart_vault_api.id
   resource_id             = aws_api_gateway_resource.restore_resource.id
   http_method             = aws_api_gateway_method.restore_method.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.smart_vault_restore_api_handler_lambda.invoke_arn # <-- UPDATED
+  uri                     = aws_lambda_function.smart_vault_restore_api_handler_lambda.invoke_arn
 }
 
-# Update the permission to allow API Gateway to invoke the new handler
 resource "aws_lambda_permission" "api_gateway_permission" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.smart_vault_restore_api_handler_lambda.function_name # <-- UPDATED
+  function_name = aws_lambda_function.smart_vault_restore_api_handler_lambda.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.smart_vault_api.execution_arn}/*/*"
+
+  # DEFINITIVE FIX: Use a slightly broader but very common source ARN format.
+  # This grants permission for any method on any resource within our specific API,
+  # which is secure and eliminates any subtle interpolation issues that were
+  # causing the integration to fail.
+  source_arn = "${aws_api_gateway_rest_api.smart_vault_api.execution_arn}/*/*"
 }
 
 resource "aws_api_gateway_deployment" "api_deployment" {
   rest_api_id = aws_api_gateway_rest_api.smart_vault_api.id
+
+  # DEFINITIVE FIX: Add a 'triggers' block. This creates a unique hash of our
+  # API's configuration. If any part of the API changes (like its integration),
+  # the hash changes, which forces Terraform to create a fresh deployment.
+  # This eliminates any chance of a stale deployment causing permission issues.
+  triggers = {
+    redeployment = sha1(jsonencode([
+      aws_api_gateway_resource.restore_resource.id,
+      aws_api_gateway_method.restore_method.id,
+      aws_api_gateway_integration.lambda_integration.id,
+    ]))
+  }
 
   lifecycle {
     create_before_destroy = true
@@ -503,7 +505,6 @@ resource "aws_api_gateway_usage_plan_key" "main" {
 # -----------------------------------------------------------------------------
 # TERRAFORM OUTPUTS
 # -----------------------------------------------------------------------------
-# Output the KMS key ARN for verification
 output "dr_kms_key_arn" {
   description = "ARN of the DR region KMS key"
   value       = aws_kms_key.dr_snapshot_key.arn

@@ -15,19 +15,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     This is the ASYNCHRONOUS worker Lambda. It is triggered by the API Handler.
     It performs the long-running tasks of restoring a volume and launching an instance.
     """
-    # NOTE: Since this is invoked asynchronously from another Lambda,
-    # the 'event' is the raw JSON payload, not an API Gateway event object.
-
     sns_client = boto3.client("sns")
-    # Use the SNS Topic ARN from the backup function, passed via environment variable
     sns_topic_arn = os.environ.get("SNS_TOPIC_ARN", "not-set")
+
+    body = event
 
     try:
         region = os.environ.get("AWS_REGION", "us-east-1")
         ec2_client = boto3.client("ec2", region_name=region)
 
         logger.info("Worker received event: %s", event)
-        body = event  # The event itself is the body now
         snapshot_id = body.get("snapshot_id")
 
         az = body.get("availability_zone")
@@ -104,17 +101,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         _send_sns_notification(
             sns_client, sns_topic_arn, "Smart Vault Restore FAILED", error_message
         )
-        # In async invocation, the return value doesn't go to the user, but it's good practice.
         return {"status": "failed", "reason": str(e)}
 
 
 # --- Helper Functions ---
-
-
 def _send_sns_notification(
     sns_client: Any, topic_arn: str, subject: str, message: str
 ) -> None:
-    """Sends a notification to the configured SNS topic."""
     if topic_arn == "not-set":
         logger.warning("SNS_TOPIC_ARN not set. Cannot send notification.")
         return
@@ -125,7 +118,6 @@ def _send_sns_notification(
 
 
 def _get_az_from_subnet(ec2_client: Any, subnet_id: str) -> str:
-    """Looks up a subnet and returns its Availability Zone."""
     try:
         response = ec2_client.describe_subnets(SubnetIds=[subnet_id])
         if not response["Subnets"]:
@@ -140,7 +132,6 @@ def _get_az_from_subnet(ec2_client: Any, subnet_id: str) -> str:
 
 
 def _verify_snapshot_exists(ec2_client: Any, snapshot_id: str) -> None:
-    """Verifies a snapshot exists, raising a ValueError if not found."""
     try:
         ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])
     except ClientError as e:
@@ -150,7 +141,6 @@ def _verify_snapshot_exists(ec2_client: Any, snapshot_id: str) -> None:
 
 
 def _create_volume(ec2_client: Any, snapshot_id: str, az: str) -> str:
-    """Creates an EBS volume from a snapshot and returns the new volume ID."""
     response = ec2_client.create_volume(
         SnapshotId=snapshot_id,
         AvailabilityZone=az,
@@ -170,7 +160,6 @@ def _create_volume(ec2_client: Any, snapshot_id: str, az: str) -> str:
 
 
 def _launch_instance(ec2_client: Any, params: Dict[str, str], az: str) -> str:
-    """Launches a new EC2 instance."""
     response = ec2_client.run_instances(
         ImageId=params["ami_id"],
         InstanceType=params["instance_type"],
@@ -196,7 +185,6 @@ def _launch_instance(ec2_client: Any, params: Dict[str, str], az: str) -> str:
 def _attach_volume(
     ec2_client: Any, instance_id: str, volume_id: str, device_name: str
 ) -> None:
-    """Attaches an EBS volume to an EC2 instance."""
     ec2_client.attach_volume(
         Device=device_name, InstanceId=instance_id, VolumeId=volume_id
     )
