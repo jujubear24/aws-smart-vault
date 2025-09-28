@@ -103,7 +103,7 @@ flowchart TD
 | Category | Technology |
 |----------|------------|
 |Infrastructure | Terraform|
-| Compute |  AWS Lambda (Python) |
+| Compute |  AWS Lambda (Python 3.12) |
 | Storage |  AWS S3 (for Terraform state), AWS EBS Snapshots |
 | API | Amazon API Gateway (REST API w/ API Key) |
 | Scheduling & Events | Amazon EventBridge |
@@ -120,7 +120,7 @@ flowchart TD
 
 * [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) installed and configured with your AWS credentials.
 
-* [Python](https://www.python.org/downloads/) installed.
+* [Python 3.12+](https://www.python.org/downloads/) installed.
 
 ### Infrastructure Deployment
 

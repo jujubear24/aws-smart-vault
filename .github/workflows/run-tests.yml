@@ -22,11 +22,11 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
 
-      # Step 2: Sets up a Python 3.9 environment for our job to use.
-      - name: Set up Python 3.9
+      # Step 2: Sets up a Python 3.12 environment for our job to use.
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: 3.9
+          python-version: '3.12' # UPDATED
 
       # Step 3: Installs our project's testing dependencies from the new requirements file.
       - name: Install dependencies
@@ -39,3 +39,5 @@ jobs:
       - name: Run unit tests
         run: |
           python -m unittest discover src/tests
+
+

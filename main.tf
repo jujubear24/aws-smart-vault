@@ -1,8 +1,11 @@
 # -----------------------------------------------------------------------------
 # DATA SOURCES
 # -----------------------------------------------------------------------------
+# This fetches information about the AWS account running the Terraform command,
+# which we need for the KMS policy.
 data "aws_caller_identity" "current" {}
 
+# This zips up our Python source code for the backup Lambda.
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/src"
@@ -225,7 +228,7 @@ resource "aws_lambda_function" "smart_vault_lambda" {
   function_name    = "SmartVault-Backup-Function"
   role             = aws_iam_role.smart_vault_lambda_exec_role.arn
   handler          = "lambda_function.lambda_handler"
-  runtime          = "python3.9"
+  runtime          = "python3.12" # UPDATED
   timeout          = 300
   memory_size      = 128
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
@@ -320,7 +323,7 @@ resource "aws_lambda_function" "smart_vault_restore_worker_lambda" {
   function_name    = "SmartVault-Restore-Worker-Function"
   role             = aws_iam_role.smart_vault_restore_lambda_role.arn
   handler          = "restore_function.handler"
-  runtime          = "python3.9"
+  runtime          = "python3.12" # UPDATED
   timeout          = 300
   memory_size      = 128
   source_code_hash = data.archive_file.restore_lambda_zip.output_base64sha256
@@ -387,7 +390,7 @@ resource "aws_lambda_function" "smart_vault_restore_api_handler_lambda" {
   function_name    = "SmartVault-Restore-API-Handler-Function"
   role             = aws_iam_role.smart_vault_restore_api_handler_role.arn
   handler          = "handler.lambda_handler"
-  runtime          = "python3.9"
+  runtime          = "python3.12" # UPDATED
   timeout          = 20
   memory_size      = 128
   source_code_hash = data.archive_file.restore_api_handler_zip.output_base64sha256
@@ -445,21 +448,12 @@ resource "aws_lambda_permission" "api_gateway_permission" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.smart_vault_restore_api_handler_lambda.function_name
   principal     = "apigateway.amazonaws.com"
-
-  # DEFINITIVE FIX: Use a slightly broader but very common source ARN format.
-  # This grants permission for any method on any resource within our specific API,
-  # which is secure and eliminates any subtle interpolation issues that were
-  # causing the integration to fail.
-  source_arn = "${aws_api_gateway_rest_api.smart_vault_api.execution_arn}/*/*"
+  source_arn    = "${aws_api_gateway_rest_api.smart_vault_api.execution_arn}/*/*"
 }
 
 resource "aws_api_gateway_deployment" "api_deployment" {
   rest_api_id = aws_api_gateway_rest_api.smart_vault_api.id
 
-  # DEFINITIVE FIX: Add a 'triggers' block. This creates a unique hash of our
-  # API's configuration. If any part of the API changes (like its integration),
-  # the hash changes, which forces Terraform to create a fresh deployment.
-  # This eliminates any chance of a stale deployment causing permission issues.
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_resource.restore_resource.id,
@@ -503,6 +497,29 @@ resource "aws_api_gateway_usage_plan_key" "main" {
 }
 
 # -----------------------------------------------------------------------------
+# COST MONITORING & ALERTING
+# -----------------------------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "billing_alarm" {
+  provider = aws
+
+  alarm_name          = "SmartVault-Total-Account-Billing-Alarm"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "EstimatedCharges"
+  namespace           = "AWS/Billing"
+  period              = 21600
+  statistic           = "Maximum"
+  threshold           = var.billing_alarm_threshold
+  alarm_description   = "This alarm triggers if the AWS account's estimated charges exceed the configured threshold."
+
+  dimensions = {
+    Currency = "USD"
+  }
+
+  alarm_actions = [aws_sns_topic.smart_vault_notifications.arn]
+}
+
+# -----------------------------------------------------------------------------
 # TERRAFORM OUTPUTS
 # -----------------------------------------------------------------------------
 output "dr_kms_key_arn" {
@@ -521,36 +538,6 @@ output "api_key_value" {
   sensitive   = true
 }
 
-
-# -----------------------------------------------------------------------------
-# FINAL FEATURE: COST MONITORING & ALERTING
-# -----------------------------------------------------------------------------
-# This creates a CloudWatch alarm that monitors the total estimated charges
-# for the entire AWS account. If the estimated charges exceed the threshold,
-# it will send a notification to our existing SNS topic.
-# NOTE: This requires that "Billing Alerts" have been manually enabled in the
-# AWS Account's billing preferences.
-resource "aws_cloudwatch_metric_alarm" "billing_alarm" {
-  # This provider block is crucial. Billing metrics are always published in us-east-1.
-  provider = aws
-
-  alarm_name          = "SmartVault-Total-Account-Billing-Alarm"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "EstimatedCharges"
-  namespace           = "AWS/Billing"
-  period              = 21600 # Check every 6 hours
-  statistic           = "Maximum"
-  threshold           = var.billing_alarm_threshold # Defaults to 5 USD
-  alarm_description   = "This alarm triggers if the AWS account's estimated charges exceed the configured threshold."
-
-  dimensions = {
-    Currency = "USD"
-  }
-
-  # Send the notification to our existing SNS topic
-  alarm_actions = [aws_sns_topic.smart_vault_notifications.arn]
-}
 
 
 
