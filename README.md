@@ -4,29 +4,25 @@
     Owned and Maintained by <a href="https://github.com/jujubear24">Jules Bahanyi</a>
 </p>
 
-This project is a complete, production-grade, serverless application built on Amazon Web Services (AWS) that provides a fully automated framework for backing up critical EC2 instances. It ensures business continuity through cross-region disaster recovery and optimizes costs through intelligent snapshot lifecycle management.
+This project is a complete, production-grade, serverless framework for automated backups and disaster recovery built on Amazon Web Services (AWS). It solves the critical business problems of data loss and prolonged downtime by providing a fully automated, cost-effective, and secure solution for protecting and restoring critical EC2 instances.
 
-The entire infrastructure is managed as code using Terraform, and the architecture is designed to be event-driven, scalable, and secure.
+The entire infrastructure is managed as code using ``Terraform``, with all application logic validated by a full suite of unit tests and a CI/CD pipeline using **GitHub Actions**.
 
 ## 1. The Business Problem & The Cloud Solution
 
-This project was designed to solve four critical business challenges related to data protection and business continuity:
+This framework was designed to solve three fundamental challenges that businesses face in the cloud:
 
-1. **Problem: Manual backups are inconsistent and error-prone.**
+1. **Problem: Data Loss from Human Error or Failures.** Manual backup processes are unreliable and inconsistent. Forgetting to back up a critical server can lead to catastrophic data loss.
 
-    * **Solution**: The entire backup process is **fully automated** using an **Amazon EventBridge** rule that triggers an **AWS Lambda** function on a daily schedule, eliminating human error and ensuring backups are never missed.
+    * **Cloud Solution**: An **event-driven**, **serverless workflow** using **AWS Lambda** and **Amazon EventBridge** automatically discovers and backs up specifically tagged EC2 instances on a daily schedule, creating encrypted, cross-region EBS snapshots without any human intervention.
 
-2. **Problem: A single-region failure can cause catastrophic data loss.**
+2. **Problem:  Slow, Complex, and Manual Recovery.** When a disaster strikes, manually provisioning new resources from backups is slow, error-prone, and dramatically increases downtime (RTO), costing the business money and customer trust.
 
-    * **Solution**: The system provides robust **disaster recovery* by automatically copying every new snapshot to a secondary AWS region, ensuring a geographically isolated backup is always available.
+    * **Cloud Solution**: A **secure, asynchronous REST API** built with **API Gateway** and two Lambda functions orchestrates the entire recovery process. A single API call can trigger a full restore, automatically launching a new EC2 instance and attaching the restored data volume, enabling rapid and reliable disaster recovery.
 
-3. **Problem: Backup storage costs can spiral out of control.**
+3. **Problem: Uncontrolled Costs.** Storing backups indefinitely or using inefficient methods leads to ever-increasing storage costs that are difficult to predict and manage.
 
-    * **Solution**: An automated lifecycle policy is built into the Lambda function. It automatically deletes old snapshots in both the primary and DR regions after a configurable retention period, providing significant cost optimization.
-
-4. **Problem: Backups lack robust security and are difficult to audit.**
-
-    * **Solution**: All disaster recovery snapshots are **encrypted by default** using a dedicated **AWS KMS key** with a strict resource policy. All actions are logged in **AWS CloudTrail**, providing a complete, auditable history of all backup and cleanup operations.
+    * **Cloud Solution**: The system implements an **automated lifecycle policy**, deleting snapshots older than a configurable retention period. A **CloudWatch Billing Alarm** provides a financial safety net by automatically sending an alert if estimated account charges exceed a predefined threshold.
 
 ## 2. Architectural Diagram
 
@@ -38,90 +34,83 @@ config:
   theme: neutral
 ---
 flowchart TD
-    subgraph CICD["⚙️ CI/CD (GitHub Actions)"]
-        A[Developer] -->|1. Push to main| B[GitHub Repo]
-        B -->|2. Triggers| C[GitHub Actions Workflow]
-        C -->|3. Run Unit Tests| D[Test Lambda Logic]
-        C -->|4. Deploy| E[Terraform Apply]
-        E -->|Updates| F[AWS Resources]
+    %% Define Subgraphs for organization
+    subgraph "CI/CD Pipeline (GitHub Actions)"
+        direction LR
+        Dev["Developer 🧑‍💻"] -- "git push" --> GitHub["GitHub Repo"]
+        GitHub -- "Triggers" --> Workflow["CI Workflow"]
+        Workflow -- "Runs" --> Tests["Unit Tests"]
     end
 
-    subgraph AWS["☁️ AWS Infrastructure"]
-        subgraph Scheduling["🗓️ Scheduling & Trigger"]
-            G[EventBridge Rule]
-        end
-
-        subgraph CoreLogic["🧠 Core Logic (Primary Region)"]
-            H[Lambda Function]
-            I[EC2 Instances]
-            J[EBS Snapshots]
-        end
-
-        subgraph DisasterRecovery["🛡️ Disaster Recovery (DR Region)"]
-            K[Encrypted EBS Snapshots]
-            L[KMS Key]
-        end
-
-        subgraph Monitoring["📊 Monitoring & Alerts"]
-            M[CloudWatch Logs]
-            N[SNS Topic]
-            O[Administrator Email]
-        end
+    subgraph "Automated Backup Workflow (Daily)"
+        direction LR
+        A["EventBridge <br> (Scheduler)"] -- "Triggers" --> B["Backup Lambda"]
+        B -- "Finds Instances by Tag" --> C["EC2 Instances <br> (tag: Backup-Tier=Gold)"]
+        B -- "Creates & Copies" --> D["EBS Snapshots <br> (Primary Region)"]
+        D -- "Copied to" --> E["EBS Snapshots <br> (DR Region)"]
+        B -- "Sends Notification" --> F["SNS Topic"]
+    end
+    
+    subgraph "Asynchronous Restore Workflow (On-Demand)"
+        direction LR
+        G["User/Client 👨‍💼"] -- "1. POST /restore <br> (snapshot_id)" --> H["API Gateway <br> (with API Key)"]
+        H -- "2. Invokes Synchronously" --> I["API Handler Lambda <br> (Fast Validator)"]
+        I -- "3. Returns '202 Accepted'" --> G
+        I -- "4. Invokes Asynchronously" --> J["Worker Lambda <br> (Long-Running Orchestrator)"]
+        J -- "5. Creates Volume" --> K["New EBS Volume"]
+        J -- "6. Launches Instance" --> L["New EC2 Instance"]
+        J -- "7. Attaches Volume" --> L
+        J -- "8. Sends Final Status" --> F
     end
 
-    %% Define Flows
-    G -->|Triggers Daily| H
-    H -->|Finds & Backs up| I
-    I -->|Creates| J
-    H -->|Copies to| K
-    H -->|Encrypts with| L
-    H -->|Deletes Old| J & K
-    H -->|Sends Logs| M
-    H -->|Sends Alerts| N
-    N -->|Notifies| O
-
-    %% Styling
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style O fill:#f9f,stroke:#333,stroke-width:2px
-    style G fill:#ffc,stroke:#333,stroke-width:1.5px
-    style H fill:#cfc,stroke:#333,stroke-width:1.5px
-    style I fill:#ccf,stroke:#333,stroke-width:1.5px
-    style J fill:#ccf,stroke:#333,stroke-width:1.5px
-    style K fill:#e6ccff,stroke:#333,stroke-width:1.5px
-    style L fill:#e6ccff,stroke:#333,stroke-width:1.5px
-    style M fill:#ffc,stroke:#333,stroke-width:1.5px
-    style N fill:#ffc,stroke:#333,stroke-width:1.5px
+    subgraph "Monitoring & Alerting"
+         M["CloudWatch <br> (Billing Metrics)"] -- "Triggers on Threshold" --> N["Billing Alarm"]
+         N -- "Sends Notification" --> F
+         F -- "Emails" --> O["Administrator 📧"]
+    end
+    
+    %% Style definitions
+    style B fill:#FFC300,stroke:#333,stroke-width:2px
+    style I fill:#FFC300,stroke:#333,stroke-width:2px
+    style J fill:#FF5733,stroke:#333,stroke-width:2px
+    style F fill:#C70039,stroke:#333,stroke-width:2px,color:#fff
+    style H fill:#900C3F,stroke:#333,stroke-width:2px,color:#fff
+    style N fill:#C70039,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 ## 3. Core Features
 
-* **Serverless Architecture**: No servers to manage. The solution is composed of managed AWS services, leading to zero idle costs.
+* **Fully Automated Backups:** Serverless cron job creates daily, encrypted, cross-region snapshots of tagged EC2 instances.
 
-* **Event-Driven Automation**: The EventBridge trigger creates a hands-off, fully automated workflow.
+* **Secure Restore API:** A REST API protected by an API key allows for on-demand disaster recovery.
 
-* **Infrastructure as Code (IaC)**: The entire cloud environment is defined declaratively using Terraform, ensuring consistent and repeatable deployments.
+* **Asynchronous Orchestration:** The restore process uses a two-part Lambda pattern to handle long-running tasks like launching an EC2 instance without timing out the API, reporting the final status via SNS.
 
-* **Automated CI/CD**: A GitHub Actions workflow can automatically test and deploy infrastructure changes on every push to the main branch.
+* **Automated Lifecycle Management:** The backup Lambda automatically deletes snapshots older than a configurable retention period to control costs.
 
-* **Unit Testing**: The core business logic in the Lambda function is validated by an automated unit testing suite using moto to mock AWS services.
+* **Infrastructure as Code (IaC):** The entire cloud environment is defined declaratively using Terraform, ensuring consistent and repeatable deployments.
 
-* **Secure by Design**: Enforces encryption in the DR region with a dedicated KMS key and follows the principle of least privilege with fine-grained IAM roles.
+* **Automated CI/CD:** A GitHub Actions workflow automatically runs the full unit test suite on every push to the main branch, ensuring code quality.
 
-* **Cost-Effective**: Pay-per-use services combined with automated snapshot cleanup ensures minimal operational cost.
+* **Comprehensive Unit Testing:** The core business logic in all Lambda functions is validated by an automated unit testing suite using ``unittest`` and ``moto``.
 
-* **Robust Error Handling & Alerting**: A CloudWatch alarm monitors for Lambda errors and sends an email notification via SNS if anomalies are detected.
+* **Cost Control:** A CloudWatch Billing Alarm provides proactive alerts if estimated monthly costs exceed a set threshold.
+
+* **Enhanced Observability:** AWS X-Ray is enabled on all Lambda functions for end-to-end distributed tracing and performance analysis.
 
 ## 4. Technology Stack
 
 | Category | Technology |
 |----------|------------|
-|Infrastructure | Terraform, AWS|
+|Infrastructure | Terraform|
 | Compute |  AWS Lambda (Python) |
 | Storage |  AWS S3 (for Terraform state), AWS EBS Snapshots |
-| Security & Identity | AWS IAM, AWS KMS |
+| API | Amazon API Gateway (REST API w/ API Key) |
+| Scheduling & Events | Amazon EventBridge |
 | CI/CD & Source Control | GitHub, GitHub Actions |
-| Testing | Python, ``unittest``, ```moto``` |
-| Monitoring & Alerting | AWS CloudWatch, AWS SNS |
+| Testing | Python, ``unittest``, ```moto```, ``freezegun`` |
+| Security & Identity | AWS IAM, AWS KMS (Key Management Service)|
+| Monitoring & Alerting | AWS CloudWatch, AWS SNS, AWS X-Ray |
 
 ## 5. Setup & Deployment
 
@@ -165,7 +154,43 @@ flowchart TD
 
     Review the plan and type `yes` to confirm the deployment.
 
-### Unit Testing
+### Testing the Restore API
+
+After deployment, Terraform will output the API URL and a sensitive API key.
+
+1. Get Outputs:
+
+    ```bash
+    API_URL="$(terraform output -raw restore_api_invoke_url)/restore"
+
+    API_KEY="$(terraform output -raw api_key_value)"
+    ```
+
+2. Find Resources: Get a valid ``SNAPSHOT_ID``, ``AMI_ID``, and ``SUBNET_ID`` from your AWS account (us-east-1).
+
+3. Run ``curl`` Test:
+
+    ```bash
+
+    # (Replace placeholder values)
+    SNAPSHOT_ID="snap-..."
+    AMI_ID="ami-..."
+    SUBNET_ID="subnet-..."
+
+    curl -X POST \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: ${API_KEY}" \
+    -d '{
+            "snapshot_id": "'"${SNAPSHOT_ID}"'",
+            "launch_instance": true,
+            "ami_id": "'"${AMI_ID}"'",
+            "subnet_id": "'"${SUBNET_ID}"'"
+        }' \
+    "${API_URL}"
+    ```
+    You should receive a 202' Accepted response. A few minutes later, an SNS email will confirm the final result.
+
+## 6. Unit Testing
 
 To run the automated tests for the Lambda function locally:
 
@@ -178,7 +203,7 @@ To run the automated tests for the Lambda function locally:
 2. **Install Test Dependencies (if not already installed)**:
 
     ```bash
-    pip install boto3 moto
+    pip install -r tests/requirements.txt
     ```
 
 3. **Run the Tests**:
@@ -187,27 +212,31 @@ To run the automated tests for the Lambda function locally:
     python -m unittest discover tests
     ```
 
-## 6. Project Structure
+## 7. Project Structure
 
 The repository is organized to separate infrastructure code from the application logic.
 
 ```
 .
-├── .github/workflows/          # (Optional) CI/CD workflow definitions
-│   └── deploy.yml
+├── .github/workflows/
+│   └── run-tests.yml        # CI/CD workflow for unit tests
 ├── src/
-│   ├── lambda_function.py      # Core Python logic for the backup process
-│   └── tests/                  # Unit tests for the Lambda function
-│       └── test_lambda.py
-├── dist/
-│   └── lambda_function.zip     # Zipped code for deployment (created by Terraform)
-├── main.tf                     # Main Terraform configuration for all AWS resources
-├── providers.tf                # Terraform provider and backend configuration
-├── variables.tf                # Input variables for Terraform
-├── .gitignore
+│   ├── lambda_function.py   # --- Backup Lambda ---
+│   ├── restore_api_handler/
+│   │   └── handler.py       # --- Restore API Handler Lambda ---
+│   ├── restore_handler/
+│   │   └── restore_function.py  # --- Restore Worker Lambda ---
+│   └── tests/
+│       ├── requirements.txt
+│       ├── test_lambda.py   # Tests for Backup Lambda
+│       └── test_restore_function.py # Tests for Restore Lambdas
+├── main.tf                  # Main Terraform configuration
+├── variables.tf             # Terraform input variables
+├── providers.tf             # Terraform provider setup
 └── README.md
+
     
 ```
 
-## 7. License
+## 8. License
 This project is licensed under the MIT License.
