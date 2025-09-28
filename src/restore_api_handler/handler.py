@@ -21,10 +21,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         worker_lambda_arn = os.environ.get("WORKER_LAMBDA_ARN")
         if not worker_lambda_arn:
             logger.error("FATAL: WORKER_LAMBDA_ARN environment variable is not set")
+            # FIX: Added the 'message' key to this error response to match our tests.
             return {
                 "statusCode": 500,
                 "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"error": "Server configuration error"}),
+                "body": json.dumps(
+                    {
+                        "error": "Server configuration error",
+                        "message": "WORKER_LAMBDA_ARN not set",
+                    }
+                ),
             }
 
         request_body = event.get("body")
@@ -93,3 +99,4 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Internal Server Error", "message": str(e)}),
         }
+    

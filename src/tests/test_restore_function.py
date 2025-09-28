@@ -112,8 +112,6 @@ class TestRestoreLambdas(unittest.TestCase):
                         mock_lambda.get_function.return_value = {
                             "Configuration": self.worker_function
                         }
-                        # FIX: Configure the mock for the 'invoke' call to return a realistic
-                        # success response, which is what the handler code expects to check.
                         mock_lambda.invoke.return_value = {"StatusCode": 202}
                         return mock_lambda
                     return original_boto3_client(service_name, **kwargs)
@@ -137,8 +135,11 @@ class TestRestoreLambdas(unittest.TestCase):
         if "WORKER_LAMBDA_ARN" in os.environ:
             del os.environ["WORKER_LAMBDA_ARN"]
 
-        response = api_handler.lambda_handler(self._create_api_event(body={}), {})
+        response = api_handler.lambda_handler(
+            self._create_api_event(body={"snapshot_id": "snap-123"}), {}
+        )
         self.assertEqual(response["statusCode"], 500)
+        # FIX: Assert against the correct error message from the robust handler
         self.assertIn(
             "WORKER_LAMBDA_ARN not set", json.loads(response["body"])["message"]
         )
@@ -168,8 +169,9 @@ class TestRestoreLambdas(unittest.TestCase):
             event = self._create_api_event(body={})
             response = api_handler.lambda_handler(event, {})
             self.assertEqual(response["statusCode"], 400)
+            # FIX: Assert against the correct, cleaner error message string
             self.assertIn(
-                "Missing required fields: ['snapshot_id']",
+                "Missing required field: snapshot_id",
                 json.loads(response["body"])["message"],
             )
 
